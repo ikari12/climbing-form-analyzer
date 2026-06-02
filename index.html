@@ -290,42 +290,6 @@ let videoEl, canvasEl, ctx;
 let comTrailCanvas, comTrailCtx;
 let allFrameData = [];
 let isAnalyzing = false;
-let prevLandmarks = null;
-
-// ── Landmark Smoothing ──
-function smoothLandmarks(lm) {
-  const alpha = 0.5; // EMA smoothing factor (0=full smooth, 1=no smooth)
-  const jumpThreshold = 0.15; // max allowed movement per frame (normalized coords)
-  
-  if (!prevLandmarks) {
-    prevLandmarks = lm.map(p => ({...p}));
-    return lm;
-  }
-  
-  const smoothed = lm.map((p, i) => {
-    if (p.visibility < 0.4) return prevLandmarks[i]; // low confidence: use previous
-    
-    const dx = Math.abs(p.x - prevLandmarks[i].x);
-    const dy = Math.abs(p.y - prevLandmarks[i].y);
-    const dist = Math.hypot(dx, dy);
-    
-    if (dist > jumpThreshold) {
-      // Outlier: point jumped too far, keep previous
-      return prevLandmarks[i];
-    }
-    
-    // EMA smoothing
-    return {
-      x: alpha * p.x + (1 - alpha) * prevLandmarks[i].x,
-      y: alpha * p.y + (1 - alpha) * prevLandmarks[i].y,
-      z: p.z,
-      visibility: p.visibility,
-    };
-  });
-  
-  prevLandmarks = smoothed.map(p => ({...p}));
-  return smoothed;
-}
 
 // ── Set today's date ──
 document.getElementById('dateInput').valueAsDate = new Date();
@@ -547,7 +511,6 @@ window.analyze = async function() {
   if (!poseLandmarker || !videoEl) return;
   isAnalyzing = true;
   allFrameData = [];
-  prevLandmarks = null;
   const analyzeBtn = document.getElementById('analyzeBtn');
   analyzeBtn.disabled = true;
   analyzeBtn.textContent = '⏳ 分析中...';
@@ -573,7 +536,7 @@ window.analyze = async function() {
     const result = poseLandmarker.detectForVideo(videoEl, ts);
 
     if (result.landmarks && result.landmarks.length > 0) {
-      const lm = smoothLandmarks(result.landmarks[0]);
+      const lm = result.landmarks[0];
       const frame = extractFrame(lm);
       if (frame) {
         frame.time = time;
@@ -1001,7 +964,7 @@ window.playWithOverlay = async function() {
     const result = poseLandmarker.detectForVideo(videoEl, ts);
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
     if (result.landmarks && result.landmarks.length > 0) {
-      const lm = smoothLandmarks(result.landmarks[0]);
+      const lm = result.landmarks[0];
       const frame = extractFrame(lm);
       drawSkeleton(lm, frame);
 
@@ -1080,7 +1043,7 @@ window.exportSkeletonVideo = async function() {
     offCtx.fillRect(0, 0, w, h);
 
     if (result.landmarks && result.landmarks.length > 0) {
-      const lm = smoothLandmarks(result.landmarks[0]);
+      const lm = result.landmarks[0];
       const frame = extractFrame(lm);
 
       // Estimate wall from wrists and ankles (contact points)
