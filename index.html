@@ -372,6 +372,7 @@ function extractFrame(landmarks) {
   const lElbow = landmarks[13], rElbow = landmarks[14];
   const lWrist = landmarks[15], rWrist = landmarks[16];
   const lHip = landmarks[23], rHip = landmarks[24];
+  const lAnkle = landmarks[27], rAnkle = landmarks[28];
 
   if (!vis(lHip) || !vis(rHip)) return null;
 
@@ -390,7 +391,72 @@ function extractFrame(landmarks) {
   }
   if (arms.length > 0) armExt = arms.reduce((a, b) => a + b) / arms.length;
 
-  return { comX, comY, armExt, time: null };
+  // Anchor points for camera stabilization (wrists + ankles)
+  const anchors = [
+    vis(lWrist) ? { x: lWrist.x, y: lWrist.y } : null,
+    vis(rWrist) ? { x: rWrist.x, y: rWrist.y } : null,
+    vis(lAnkle) ? { x: lAnkle.x, y: lAnkle.y } : null,
+    vis(rAnkle) ? { x: rAnkle.x, y: rAnkle.y } : null,
+  ];
+
+  return { comX, comY, armExt, anchors, time: null };
+}
+
+// ── Camera Stabilization ──
+// Detect static limb endpoints (on holds) and subtract their apparent motion
+function stabilizeFrames(frames) {
+  if (frames.length < 3) return frames;
+  const stabilized = [{ ...frames[0], camDx: 0, camDy: 0, staticAnchors: [] }];
+  let cumDx = 0, cumDy = 0;
+
+  for (let i = 1; i < frames.length; i++) {
+    const prev = frames[i - 1];
+    const curr = frames[i];
+
+    // Compute displacement of each anchor point (0=lWrist,1=rWrist,2=lAnkle,3=rAnkle)
+    const displacements = [];
+    for (let a = 0; a < 4; a++) {
+      if (prev.anchors[a] && curr.anchors[a]) {
+        const dx = curr.anchors[a].x - prev.anchors[a].x;
+        const dy = curr.anchors[a].y - prev.anchors[a].y;
+        const mag = Math.hypot(dx, dy);
+        displacements.push({ idx: a, dx, dy, mag });
+      }
+    }
+
+    let camDx = 0, camDy = 0;
+    const staticAnchors = [];
+    if (displacements.length >= 2) {
+      // Sort by magnitude — smallest movers are on holds (static)
+      displacements.sort((a, b) => a.mag - b.mag);
+      // Use the 2 most static anchors
+      const nStatic = Math.min(2, displacements.length);
+      for (let s = 0; s < nStatic; s++) {
+        camDx += displacements[s].dx;
+        camDy += displacements[s].dy;
+        staticAnchors.push(displacements[s].idx);
+      }
+      camDx /= nStatic;
+      camDy /= nStatic;
+    } else if (displacements.length === 1) {
+      camDx = displacements[0].dx * 0.5;
+      camDy = displacements[0].dy * 0.5;
+      staticAnchors.push(displacements[0].idx);
+    }
+
+    cumDx += camDx;
+    cumDy += camDy;
+
+    stabilized.push({
+      ...curr,
+      comX: curr.comX - cumDx,
+      comY: curr.comY - cumDy,
+      camDx: cumDx,
+      camDy: cumDy,
+      staticAnchors,
+    });
+  }
+  return stabilized;
 }
 
 // ── Metric computation ──
@@ -564,8 +630,16 @@ window.analyze = async function() {
     return;
   }
 
+  // Camera stabilization: detect static anchors and subtract camera motion
+  const stabilized = stabilizeFrames(allFrameData);
+  const maxCamDrift = Math.max(...stabilized.map(f => Math.hypot(f.camDx || 0, f.camDy || 0)));
+  const wasStabilized = maxCamDrift > 0.005; // meaningful correction applied
+  allFrameData = stabilized;
+
   const metrics = computeMetrics(allFrameData);
   if (metrics) {
+    metrics.stabilized = wasStabilized;
+    metrics.camDrift = parseFloat(maxCamDrift.toFixed(4));
     showResults(metrics);
     drawComTrail();
   }
@@ -575,6 +649,9 @@ window.analyze = async function() {
 };
 
 // ── Draw Skeleton ──
+// anchorLmIdx: landmark indices for anchors [lWrist=15, rWrist=16, lAnkle=27, rAnkle=28]
+const ANCHOR_LM = [15, 16, 27, 28];
+
 function drawSkeleton(landmarks, frame) {
   const w = canvasEl.width, h = canvasEl.height;
   const toXY = (p) => ({ x: p.x * w, y: p.y * h });
@@ -591,7 +668,6 @@ function drawSkeleton(landmarks, frame) {
     if (landmarks[a].visibility > 0.3 && landmarks[b].visibility > 0.3) {
       const isArm = (a >= 11 && a <= 16 && b >= 11 && b <= 16);
       if (isArm && frame && frame.armExt != null) {
-        // Green if extended (>150°), yellow if mid, red if bent (<90°)
         const t = Math.min(1, Math.max(0, (frame.armExt - 60) / 120));
         const r = Math.round(255 * (1 - t));
         const g = Math.round(231 * t);
@@ -611,6 +687,62 @@ function drawSkeleton(landmarks, frame) {
       const p = toXY(landmarks[i]);
       ctx.fillStyle = i <= 16 ? '#60a5fa' : i <= 24 ? '#c084fc' : '#6ee7b7';
       ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // ── Stabilization overlay ──
+  if (frame && frame.staticAnchors && frame.staticAnchors.length > 0) {
+    const staticSet = new Set(frame.staticAnchors);
+    // Draw anchor status rings: green=static(on hold), red=moving
+    for (let a = 0; a < 4; a++) {
+      const lmIdx = ANCHOR_LM[a];
+      if (landmarks[lmIdx].visibility > 0.3) {
+        const p = toXY(landmarks[lmIdx]);
+        const isStatic = staticSet.has(a);
+        // Outer ring
+        ctx.strokeStyle = isStatic ? 'rgba(110,231,183,0.9)' : 'rgba(248,113,113,0.6)';
+        ctx.lineWidth = isStatic ? 3 : 1.5;
+        ctx.beginPath(); ctx.arc(p.x, p.y, isStatic ? 10 : 7, 0, Math.PI * 2); ctx.stroke();
+        // Label for static anchors
+        if (isStatic) {
+          ctx.fillStyle = 'rgba(110,231,183,0.8)';
+          ctx.font = 'bold 9px Inter, sans-serif';
+          ctx.fillText('HOLD', p.x + 12, p.y - 4);
+        }
+      }
+    }
+
+    // Camera drift arrow (top-left HUD)
+    if (frame.camDx != null) {
+      const arrowScale = 300; // amplify for visibility
+      const ax = 50, ay = 40;
+      const adx = frame.camDx * arrowScale;
+      const ady = frame.camDy * arrowScale;
+      const driftMag = Math.hypot(frame.camDx, frame.camDy);
+      // Background
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.beginPath(); ctx.roundRect(10, 10, 100, 50, 6); ctx.fill();
+      // Label
+      ctx.fillStyle = '#fbbf24';
+      ctx.font = 'bold 9px Inter, sans-serif';
+      ctx.fillText('📷 CAM DRIFT', 16, 24);
+      ctx.fillStyle = '#b0b8c4';
+      ctx.font = '8px Inter, sans-serif';
+      ctx.fillText(`${(driftMag * 100).toFixed(1)}%`, 16, 54);
+      // Arrow
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + adx, ay + ady); ctx.stroke();
+      // Arrowhead
+      if (Math.hypot(adx, ady) > 3) {
+        const angle = Math.atan2(ady, adx);
+        ctx.beginPath();
+        ctx.moveTo(ax + adx, ay + ady);
+        ctx.lineTo(ax + adx - 6 * Math.cos(angle - 0.4), ay + ady - 6 * Math.sin(angle - 0.4));
+        ctx.moveTo(ax + adx, ay + ady);
+        ctx.lineTo(ax + adx - 6 * Math.cos(angle + 0.4), ay + ady - 6 * Math.sin(angle + 0.4));
+        ctx.stroke();
+      }
     }
   }
 
@@ -784,19 +916,24 @@ function showResults(m) {
       </div>`;
   }
 
-  // Add frame count info
+  // Add frame count info + stabilization status
+  const stabInfo = m.stabilized
+    ? `<span style="color:var(--accent)">📷 カメラ補正: ON（最大ドリフト ${(m.camDrift * 100).toFixed(1)}%）</span>`
+    : `<span style="color:var(--text-2)">📷 カメラ補正: 不要（ドリフト ${(m.camDrift * 100).toFixed(1)}%）</span>`;
   grid.innerHTML += `
     <div class="metric-card" style="grid-column: span 3">
       <div class="metric-label">📊 分析概要</div>
       <div style="font-size:0.85rem;color:var(--text-1);margin-top:0.3rem">
         分析フレーム: <strong style="color:var(--text-0)">${m.frameCount}</strong> |
         動画長: <strong style="color:var(--text-0)">${m.durationSec}s</strong> |
-        グレード: <strong style="color:var(--accent)">${document.getElementById('gradeSelect').value}</strong>
+        グレード: <strong style="color:var(--accent)">${document.getElementById('gradeSelect').value}</strong><br>
+        ${stabInfo}
       </div>
     </div>`;
 
   document.getElementById('results').style.display = 'block';
-  document.getElementById('status').textContent = `✅ 分析完了: ${m.frameCount}フレームから6指標を算出`;
+  const stabLabel = m.stabilized ? '（カメラ補正適用）' : '';
+  document.getElementById('status').textContent = `✅ 分析完了${stabLabel}: ${m.frameCount}フレームから6指標を算出`;
 
   window._currentMetrics = m;
 }
@@ -966,6 +1103,21 @@ window.playWithOverlay = async function() {
     if (result.landmarks && result.landmarks.length > 0) {
       const lm = result.landmarks[0];
       const frame = extractFrame(lm);
+
+      // Merge stabilization data from nearest analyzed frame
+      if (frame && allFrameData.length > 0) {
+        const curTime = videoEl.currentTime;
+        let nearest = allFrameData[0];
+        let minDt = Math.abs(curTime - nearest.time);
+        for (const sf of allFrameData) {
+          const dt = Math.abs(curTime - sf.time);
+          if (dt < minDt) { minDt = dt; nearest = sf; }
+        }
+        frame.staticAnchors = nearest.staticAnchors || [];
+        frame.camDx = nearest.camDx || 0;
+        frame.camDy = nearest.camDy || 0;
+      }
+
       drawSkeleton(lm, frame);
 
       // Draw CoM trail during replay
