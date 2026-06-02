@@ -1132,34 +1132,28 @@ window.exportSkeletonVideo = async function() {
     // HUD overlay with metrics
     const m = window._currentMetrics;
     const grade = document.getElementById('gradeSelect').value;
-    const hudH = m ? 88 : 48;
-    offCtx.fillStyle = 'rgba(0,0,0,0.75)';
+    const hudH = m ? 140 : 60;
+    offCtx.fillStyle = 'rgba(0,0,0,0.8)';
     offCtx.fillRect(0, h - hudH, w, hudH);
-
-    // Top line: grade + frame
     offCtx.fillStyle = '#6ee7b7';
-    offCtx.font = 'bold 14px Inter, sans-serif';
-    offCtx.fillText(`🧗 ${grade}`, 14, h - hudH + 20);
+    offCtx.font = 'bold 24px Inter, sans-serif';
+    offCtx.fillText(`🧗 ${grade}`, 20, h - hudH + 32);
     offCtx.fillStyle = '#6e7a8a';
-    offCtx.font = '11px Inter, monospace';
-    offCtx.fillText(`Frame ${i + 1}/${totalFrames}  ${time.toFixed(1)}s`, 14, h - hudH + 38);
-
-    // Metrics line
+    offCtx.font = '16px Inter, monospace';
+    offCtx.fillText(`Frame ${i + 1}/${totalFrames}  ${time.toFixed(1)}s`, 20, h - hudH + 56);
     if (m) {
-      const metricsLine1 = `GE: ${m.ge}  |  Jerk: ${m.jerkRMS}  |  Arm: ${m.armExtMedian != null ? m.armExtMedian + '\u00b0' : '-'}`;
-      const metricsLine2 = `Immobility: ${m.immobilityRatio}  |  Speed: ${m.climbSpeed}/min  |  Peak: ${m.peakSpeed}`;
       offCtx.fillStyle = '#fbbf24';
-      offCtx.font = 'bold 12px Inter, monospace';
-      offCtx.fillText(metricsLine1, 14, h - 28);
+      offCtx.font = 'bold 20px Inter, monospace';
+      offCtx.fillText(`GE: ${m.ge}  |  Jerk: ${m.jerkRMS}  |  Arm: ${m.armExtMedian != null ? m.armExtMedian + '\u00b0' : '-'}`, 20, h - 42);
       offCtx.fillStyle = '#b0b8c4';
-      offCtx.font = '12px Inter, monospace';
-      offCtx.fillText(metricsLine2, 14, h - 10);
+      offCtx.font = '18px Inter, monospace';
+      offCtx.fillText(`Immobility: ${m.immobilityRatio}  |  Speed: ${m.climbSpeed}/min  |  Peak: ${m.peakSpeed}`, 20, h - 14);
     }
-
+    // Mirror to visible canvas for live preview
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    ctx.drawImage(offCanvas, 0, 0);
     const pct = ((i + 1) / totalFrames * 100).toFixed(0);
     document.getElementById('status').textContent = `🎬 スケルトン動画を生成中... ${pct}%`;
-
-    // Small delay for recorder to capture frame
     await new Promise(r => setTimeout(r, 100));
   }
 
