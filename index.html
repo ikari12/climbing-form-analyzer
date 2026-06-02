@@ -404,10 +404,13 @@ function extractFrame(landmarks) {
 
 // ── Camera Stabilization ──
 // Detect static limb endpoints (on holds) and subtract their apparent motion
+// Uses EMA decay to prevent cumulative drift error
 function stabilizeFrames(frames) {
   if (frames.length < 3) return frames;
   const stabilized = [{ ...frames[0], camDx: 0, camDy: 0, staticAnchors: [] }];
   let cumDx = 0, cumDy = 0;
+  const DECAY = 0.92;         // EMA decay: forget 8% of old correction per frame
+  const MAX_STEP = 0.015;     // cap per-frame correction (normalized coords)
 
   for (let i = 1; i < frames.length; i++) {
     const prev = frames[i - 1];
@@ -424,28 +427,36 @@ function stabilizeFrames(frames) {
       }
     }
 
-    let camDx = 0, camDy = 0;
+    let stepDx = 0, stepDy = 0;
     const staticAnchors = [];
     if (displacements.length >= 2) {
       // Sort by magnitude — smallest movers are on holds (static)
       displacements.sort((a, b) => a.mag - b.mag);
-      // Use the 2 most static anchors
       const nStatic = Math.min(2, displacements.length);
       for (let s = 0; s < nStatic; s++) {
-        camDx += displacements[s].dx;
-        camDy += displacements[s].dy;
+        stepDx += displacements[s].dx;
+        stepDy += displacements[s].dy;
         staticAnchors.push(displacements[s].idx);
       }
-      camDx /= nStatic;
-      camDy /= nStatic;
+      stepDx /= nStatic;
+      stepDy /= nStatic;
     } else if (displacements.length === 1) {
-      camDx = displacements[0].dx * 0.5;
-      camDy = displacements[0].dy * 0.5;
+      stepDx = displacements[0].dx * 0.5;
+      stepDy = displacements[0].dy * 0.5;
       staticAnchors.push(displacements[0].idx);
     }
 
-    cumDx += camDx;
-    cumDy += camDy;
+    // Cap per-frame step to avoid large jumps
+    const stepMag = Math.hypot(stepDx, stepDy);
+    if (stepMag > MAX_STEP) {
+      const scale = MAX_STEP / stepMag;
+      stepDx *= scale;
+      stepDy *= scale;
+    }
+
+    // EMA: decay old correction + add new step
+    cumDx = cumDx * DECAY + stepDx;
+    cumDy = cumDy * DECAY + stepDy;
 
     stabilized.push({
       ...curr,
