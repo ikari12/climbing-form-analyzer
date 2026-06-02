@@ -205,7 +205,9 @@ ol.instructions li { word-break: break-all; overflow-wrap: break-word; }
       <div class="upload-text">動画ファイルをドロップ or クリックして選択<br>(MP4 / MOV / WebM)</div>
     </div>
     <input type="file" id="videoInput" accept="video/*" style="display:none">
-
+    <div style="text-align:center;margin-top:0.6rem">
+      <a href="#" id="sampleLink" onclick="loadSampleVideo(event)" style="color:var(--accent);font-size:0.85rem;text-decoration:underline">🎥 サンプル動画で試す</a>
+    </div>
 
     <div class="meta-row">
       <div class="meta-group">
@@ -1185,7 +1187,7 @@ window.loadSampleVideo = async function(e) {
   e.preventDefault();
   document.getElementById('status').textContent = '⏳ サンプル動画を読み込み中...';
   try {
-    const resp = await fetch('../data/walk_08.mp4');
+    const resp = await fetch('sample.mp4');
     if (!resp.ok) throw new Error('動画の取得に失敗: ' + resp.status);
     const blob = await resp.blob();
     const file = new File([blob], 'walk_08.mp4', { type: 'video/mp4' });
