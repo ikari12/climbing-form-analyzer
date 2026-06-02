@@ -290,6 +290,41 @@ let videoEl, canvasEl, ctx;
 let comTrailCanvas, comTrailCtx;
 let allFrameData = [];
 let isAnalyzing = false;
+let prevLandmarks = null;
+
+// ── Outlier Rejection (velocity-based, no smoothing) ──
+function rejectOutliers(lm) {
+  // Max plausible movement per frame at 10fps (normalized coords)
+  // Human limb max ~2m/s, frame covers ~2m width → 0.1/frame is very fast
+  const maxSpeed = 0.12; // extremities (wrists, ankles)
+  const maxSpeedCore = 0.06; // core (hips, shoulders)
+  
+  if (!prevLandmarks) {
+    prevLandmarks = lm.map(p => ({...p}));
+    return lm;
+  }
+  
+  const extremities = new Set([15, 16, 17, 18, 19, 20, 27, 28, 29, 30, 31, 32]); // wrists, hands, ankles, feet
+  
+  const filtered = lm.map((p, i) => {
+    if (i < 11) return p; // skip face landmarks
+    if (p.visibility < 0.3) return prevLandmarks[i]; // low confidence: use previous
+    
+    const prev = prevLandmarks[i];
+    const dist = Math.hypot(p.x - prev.x, p.y - prev.y);
+    const threshold = extremities.has(i) ? maxSpeed : maxSpeedCore;
+    
+    if (dist > threshold) {
+      // Outlier: physically impossible movement, keep previous
+      return prev;
+    }
+    
+    return p; // normal movement: pass through unchanged
+  });
+  
+  prevLandmarks = filtered.map(p => ({...p}));
+  return filtered;
+}
 
 // ── Set today's date ──
 document.getElementById('dateInput').valueAsDate = new Date();
@@ -511,6 +546,7 @@ window.analyze = async function() {
   if (!poseLandmarker || !videoEl) return;
   isAnalyzing = true;
   allFrameData = [];
+  prevLandmarks = null;
   const analyzeBtn = document.getElementById('analyzeBtn');
   analyzeBtn.disabled = true;
   analyzeBtn.textContent = '⏳ 分析中...';
@@ -536,7 +572,7 @@ window.analyze = async function() {
     const result = poseLandmarker.detectForVideo(videoEl, ts);
 
     if (result.landmarks && result.landmarks.length > 0) {
-      const lm = result.landmarks[0];
+      const lm = rejectOutliers(result.landmarks[0]);
       const frame = extractFrame(lm);
       if (frame) {
         frame.time = time;
@@ -964,7 +1000,7 @@ window.playWithOverlay = async function() {
     const result = poseLandmarker.detectForVideo(videoEl, ts);
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
     if (result.landmarks && result.landmarks.length > 0) {
-      const lm = result.landmarks[0];
+      const lm = rejectOutliers(result.landmarks[0]);
       const frame = extractFrame(lm);
       drawSkeleton(lm, frame);
 
@@ -1043,7 +1079,7 @@ window.exportSkeletonVideo = async function() {
     offCtx.fillRect(0, 0, w, h);
 
     if (result.landmarks && result.landmarks.length > 0) {
-      const lm = result.landmarks[0];
+      const lm = rejectOutliers(result.landmarks[0]);
       const frame = extractFrame(lm);
 
       // Estimate wall from wrists and ankles (contact points)
