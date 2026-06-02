@@ -246,6 +246,7 @@ ol.instructions li { word-break: break-all; overflow-wrap: break-word; }
     <div class="btn-row">
       <button class="btn btn-primary" id="analyzeBtn" disabled onclick="analyze()">🔬 分析開始</button>
       <button class="btn btn-secondary" id="replayBtn" style="display:none" onclick="playWithOverlay()">▶ スケルトン再生</button>
+      <button class="btn btn-secondary" id="exportVideoBtn" style="display:none" onclick="exportSkeletonVideo()">🎬 スケルトン動画を出力</button>
       <button class="btn btn-secondary" id="resetBtn" style="display:none" onclick="reset()">🔄 リセット</button>
     </div>
   </div>
@@ -567,6 +568,7 @@ window.analyze = async function() {
     drawComTrail();
   }
   document.getElementById('replayBtn').style.display = 'inline-flex';
+  document.getElementById('exportVideoBtn').style.display = 'inline-flex';
   analyzeBtn.disabled = false;
 };
 
@@ -980,6 +982,186 @@ window.playWithOverlay = async function() {
     requestAnimationFrame(drawFrame);
   };
   requestAnimationFrame(drawFrame);
+};
+
+// ── Export Skeleton-Only Video ──
+window.exportSkeletonVideo = async function() {
+  if (!poseLandmarker || !videoEl || allFrameData.length < 10) return;
+
+  const exportBtn = document.getElementById('exportVideoBtn');
+  exportBtn.disabled = true;
+  exportBtn.textContent = '⏳ 動画生成中...';
+
+  // Create offscreen canvas
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = canvasEl.width;
+  offCanvas.height = canvasEl.height;
+  const offCtx = offCanvas.getContext('2d');
+
+  const stream = offCanvas.captureStream(10);
+  const recorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+  const chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+  recorder.onstop = () => {
+    const blob = new Blob(chunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `skeleton_${document.getElementById('gradeSelect').value}_${document.getElementById('dateInput').value}.webm`;
+    a.click();
+    URL.revokeObjectURL(url);
+    exportBtn.disabled = false;
+    exportBtn.textContent = '🎬 スケルトン動画を出力';
+    document.getElementById('status').textContent = '✅ スケルトン動画をダウンロードしました';
+  };
+
+  recorder.start();
+
+  const w = offCanvas.width, h = offCanvas.height;
+  const toXY = (p) => ({ x: p.x * w, y: p.y * h });
+  const duration = videoEl.duration;
+  const fps = 10;
+  const totalFrames = Math.floor(duration * fps);
+  const trailPoints = [];
+  let wallXs = [];
+
+  videoEl.currentTime = 0;
+
+  for (let i = 0; i < totalFrames; i++) {
+    const time = i / fps;
+    videoEl.currentTime = time;
+    await new Promise(r => { videoEl.onseeked = r; setTimeout(r, 200); });
+
+    const ts = performance.now();
+    const result = poseLandmarker.detectForVideo(videoEl, ts);
+
+    // Black background
+    offCtx.fillStyle = '#0e1117';
+    offCtx.fillRect(0, 0, w, h);
+
+    if (result.landmarks && result.landmarks.length > 0) {
+      const lm = result.landmarks[0];
+      const frame = extractFrame(lm);
+
+      // Estimate wall from wrists and ankles (contact points)
+      const contactPts = [15, 16, 27, 28, 31, 32].filter(idx => lm[idx].visibility > 0.4);
+      if (contactPts.length > 0) {
+        const avgX = contactPts.reduce((s, idx) => s + lm[idx].x, 0) / contactPts.length;
+        wallXs.push(avgX);
+      }
+
+      // Draw wall line (moving average)
+      if (wallXs.length > 5) {
+        const recentWall = wallXs.slice(-30);
+        const wallX = (recentWall.reduce((a, b) => a + b) / recentWall.length) * w;
+        offCtx.strokeStyle = 'rgba(255,255,255,0.15)';
+        offCtx.lineWidth = 3;
+        offCtx.setLineDash([8, 8]);
+        offCtx.beginPath();
+        offCtx.moveTo(wallX, 0);
+        offCtx.lineTo(wallX, h);
+        offCtx.stroke();
+        offCtx.setLineDash([]);
+
+        // Wall label
+        offCtx.fillStyle = 'rgba(255,255,255,0.3)';
+        offCtx.font = '12px Inter, sans-serif';
+        offCtx.fillText('WALL', wallX + 6, 20);
+      }
+
+      // Draw skeleton on black bg
+      const connections = [
+        [23,25],[25,27],[27,29],[29,31],[27,31],
+        [24,26],[26,28],[28,30],[30,32],[28,32],
+        [23,24],[23,11],[24,12],[11,12],
+        [11,13],[13,15],[12,14],[14,16],
+      ];
+      for (const [a, b] of connections) {
+        if (lm[a].visibility > 0.3 && lm[b].visibility > 0.3) {
+          const isArm = (a >= 11 && a <= 16 && b >= 11 && b <= 16);
+          if (isArm && frame && frame.armExt != null) {
+            const t = Math.min(1, Math.max(0, (frame.armExt - 60) / 120));
+            const r = Math.round(255 * (1 - t));
+            const g = Math.round(231 * t);
+            offCtx.strokeStyle = `rgba(${r},${g},120,0.9)`;
+          } else {
+            offCtx.strokeStyle = 'rgba(110,231,183,0.8)';
+          }
+          offCtx.lineWidth = 3;
+          const pa = toXY(lm[a]), pb = toXY(lm[b]);
+          offCtx.beginPath(); offCtx.moveTo(pa.x, pa.y); offCtx.lineTo(pb.x, pb.y); offCtx.stroke();
+        }
+      }
+
+      // Joint dots
+      for (let j = 11; j <= 32; j++) {
+        if (lm[j].visibility > 0.3) {
+          const p = toXY(lm[j]);
+          offCtx.fillStyle = j <= 16 ? '#60a5fa' : j <= 24 ? '#c084fc' : '#6ee7b7';
+          offCtx.beginPath(); offCtx.arc(p.x, p.y, 5, 0, Math.PI * 2); offCtx.fill();
+        }
+      }
+
+      // CoM dot + trail
+      if (frame) {
+        const com = toXY({ x: frame.comX, y: frame.comY });
+        trailPoints.push(com);
+
+        // Trail
+        if (trailPoints.length > 1) {
+          offCtx.strokeStyle = 'rgba(251,191,36,0.3)';
+          offCtx.lineWidth = 1.5;
+          offCtx.beginPath();
+          offCtx.moveTo(trailPoints[0].x, trailPoints[0].y);
+          for (const p of trailPoints) offCtx.lineTo(p.x, p.y);
+          offCtx.stroke();
+        }
+
+        // CoM marker
+        offCtx.fillStyle = '#fbbf24';
+        offCtx.beginPath(); offCtx.arc(com.x, com.y, 7, 0, Math.PI * 2); offCtx.fill();
+        offCtx.strokeStyle = 'rgba(251,191,36,0.4)';
+        offCtx.lineWidth = 1;
+        offCtx.beginPath(); offCtx.arc(com.x, com.y, 14, 0, Math.PI * 2); offCtx.stroke();
+      }
+    }
+
+    // HUD overlay with metrics
+    const m = window._currentMetrics;
+    const grade = document.getElementById('gradeSelect').value;
+    const hudH = m ? 88 : 48;
+    offCtx.fillStyle = 'rgba(0,0,0,0.75)';
+    offCtx.fillRect(0, h - hudH, w, hudH);
+
+    // Top line: grade + frame
+    offCtx.fillStyle = '#6ee7b7';
+    offCtx.font = 'bold 14px Inter, sans-serif';
+    offCtx.fillText(`🧗 ${grade}`, 14, h - hudH + 20);
+    offCtx.fillStyle = '#6e7a8a';
+    offCtx.font = '11px Inter, monospace';
+    offCtx.fillText(`Frame ${i + 1}/${totalFrames}  ${time.toFixed(1)}s`, 14, h - hudH + 38);
+
+    // Metrics line
+    if (m) {
+      const metricsLine1 = `GE: ${m.ge}  |  Jerk: ${m.jerkRMS}  |  Arm: ${m.armExtMedian != null ? m.armExtMedian + '\u00b0' : '-'}`;
+      const metricsLine2 = `Immobility: ${m.immobilityRatio}  |  Speed: ${m.climbSpeed}/min  |  Peak: ${m.peakSpeed}`;
+      offCtx.fillStyle = '#fbbf24';
+      offCtx.font = 'bold 12px Inter, monospace';
+      offCtx.fillText(metricsLine1, 14, h - 28);
+      offCtx.fillStyle = '#b0b8c4';
+      offCtx.font = '12px Inter, monospace';
+      offCtx.fillText(metricsLine2, 14, h - 10);
+    }
+
+    const pct = ((i + 1) / totalFrames * 100).toFixed(0);
+    document.getElementById('status').textContent = `🎬 スケルトン動画を生成中... ${pct}%`;
+
+    // Small delay for recorder to capture frame
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  recorder.stop();
 };
 
 // ── Reset ──
